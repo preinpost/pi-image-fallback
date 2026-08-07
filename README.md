@@ -81,14 +81,17 @@ then flashes a `✓` and settles back to `img-fb:openai/gpt-5.6-luna`.
 ## Install
 
 ```bash
-pi install /Users/ms/dev/pi-image-fallback
+# from npm (recommended)
+pi install npm:pi-image-fallback
+
+# or try it without installing
+pi -e npm:pi-image-fallback
+
+# or from a local checkout
+# pi install /Users/ms/dev/pi-image-fallback
 ```
 
-or try it without installing:
-
-```bash
-pi -e /Users/ms/dev/pi-image-fallback
-```
+Published on [npm](https://www.npmjs.com/package/pi-image-fallback).
 
 ## Usage
 
