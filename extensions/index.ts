@@ -25,8 +25,9 @@
  *
  * Config persisted to ~/.pi/agent/image-fallback.json.
  */
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import type { Api, Context, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -164,13 +165,13 @@ export default function imageFallbackExtension(pi: ExtensionAPI) {
 		updateStatus(ctx);
 	});
 
-	// One-shot vision call: describe a single image file and return text.
-	async function describeImage(
+	// One-shot vision call: describe raw image bytes and return text.
+	async function describeImageData(
 		ctx: ExtensionContext,
 		model: Model<Api>,
-		filePath: string,
+		data: Buffer,
+		mimeType: string,
 	): Promise<string> {
-		const buf = readFileSync(filePath); // throws if unreadable
 		const context: Context = {
 			systemPrompt:
 				"You are an image captioner. Describe the entire image accurately and completely. " +
@@ -181,7 +182,7 @@ export default function imageFallbackExtension(pi: ExtensionAPI) {
 					role: "user",
 					content: [
 						{ type: "text", text: "Describe this image in full detail." },
-						{ type: "image", data: buf.toString("base64"), mimeType: mimeForPath(filePath) },
+						{ type: "image", data: data.toString("base64"), mimeType },
 					],
 					timestamp: Date.now(),
 				},
@@ -192,6 +193,15 @@ export default function imageFallbackExtension(pi: ExtensionAPI) {
 			.filter((c): c is { type: "text"; text: string } => c.type === "text" && !!c.text)
 			.map((c) => c.text);
 		return text.join("\n").trim();
+	}
+
+	// One-shot vision call: describe a single image file and return text.
+	async function describeImage(
+		ctx: ExtensionContext,
+		model: Model<Api>,
+		filePath: string,
+	): Promise<string> {
+		return describeImageData(ctx, model, readFileSync(filePath), mimeForPath(filePath)); // throws if unreadable
 	}
 
 	// Describe a list of image paths, hitting the cache where possible.
@@ -304,6 +314,106 @@ export default function imageFallbackExtension(pi: ExtensionAPI) {
 				action: "transform",
 				text: `${event.text}\n\n[이미지 내용]\n${buildBody(descriptions)}`,
 			};
+		} finally {
+			updateStatus(ctx);
+		}
+	});
+
+	// ---- Agent-loop images (read tool) ----
+	// When the model calls read on an image, pi's tool result is a text note plus
+	// an image content block, and for text-only models the image is dropped
+	// ("The image will be omitted from this request."). Remember the file path per
+	// toolCallId so we can describe the ORIGINAL file (higher fidelity than the
+	// possibly-resized base64 in the message) and reuse the paste-path cache.
+	const readToolPaths = new Map<string, { path: string; cwd: string }>();
+
+	pi.on("tool_execution_start", (event, ctx) => {
+		if (event.toolName === "read" && typeof event.args?.path === "string") {
+			if (readToolPaths.size > 500) readToolPaths.clear(); // bound the map
+			readToolPaths.set(event.toolCallId, { path: event.args.path, cwd: ctx.cwd });
+		}
+	});
+
+	// Describe one image content block found in a tool result. Prefers the original
+	// file (via the read-tool path correlation); falls back to the base64 data in
+	// the message. Cache key = resolved file path or a sha1 of the data.
+	async function describeToolResultImage(
+		ctx: ExtensionContext,
+		model: Model<Api>,
+		block: { type: "image"; data: string; mimeType: string },
+		ref: { path: string; cwd: string } | undefined,
+	): Promise<{ text: string }> {
+		const abs = ref ? (isAbsolute(ref.path) ? ref.path : join(ref.cwd, ref.path)) : undefined;
+		if (abs) {
+			const hit = descriptionCache.get(abs);
+			if (hit) return { text: hit };
+			try {
+				const text = await describeImage(ctx, model, abs);
+				descriptionCache.set(abs, text);
+				return { text };
+			} catch (err) {
+				log("  tool-result file describe failed for", abs, String(err));
+			}
+		}
+		const dataKey = `data:${createHash("sha1").update(block.data).digest("hex")}`;
+		const dataHit = descriptionCache.get(dataKey);
+		if (dataHit) return { text: dataHit };
+		const text = await describeImageData(
+			ctx,
+			model,
+			Buffer.from(block.data, "base64"),
+			block.mimeType ?? "image/png",
+		);
+		descriptionCache.set(dataKey, text);
+		return { text };
+	}
+
+	// Replace image blocks in a read tool result with a text description, so the
+	// text-only model "sees" the image in the agent loop. The replacement is
+	// applied in-place before persistence, so it lands in session history and
+	// follow-ups just work (same philosophy as the paste path).
+	pi.on("message_end", async (event, ctx) => {
+		const msg = event.message;
+		if (msg.role !== "toolResult") return;
+		const current = ctx.model;
+		if (!current || current.input.includes("image")) return;
+		const img = resolveImageModel(ctx);
+		if (!img) return;
+
+		const imageBlocks = msg.content.filter(
+			(c): c is { type: "image"; data: string; mimeType: string } => c.type === "image",
+		);
+		if (imageBlocks.length === 0) return;
+
+		const ref = readToolPaths.get(msg.toolCallId);
+		readToolPaths.delete(msg.toolCallId);
+
+		updateStatus(ctx, "describing…");
+		try {
+			const descriptions: string[] = [];
+			for (const block of imageBlocks) {
+				try {
+					const { text } = await describeToolResultImage(ctx, img, block, ref);
+					if (text) {
+						descriptions.push(text);
+						log("  tool-result described chars=", text.length);
+					}
+				} catch (err) {
+					log("  tool-result describe failed:", String(err));
+				}
+			}
+			if (descriptions.length === 0) return;
+
+			flashStatus(ctx, "✓");
+			// Keep the original text note ("Read image file [image/png]") but drop the
+			// "image will be omitted" line — the image is no longer omitted.
+			const keptText = msg.content.filter(
+				(c): c is { type: "text"; text: string } =>
+					c.type === "text" && !c.text.includes("The image will be omitted"),
+			);
+			const descText = { type: "text" as const, text: buildBody(descriptions) };
+			log("  replacing toolResult image blocks chars=", buildBody(descriptions).length);
+			return { message: { ...msg, content: [...keptText, descText] } };
 		} finally {
 			updateStatus(ctx);
 		}

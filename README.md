@@ -62,11 +62,34 @@ therefore scans the **prompt text** for image file paths. It handles:
 |---|---|---|
 | **Idle turn** | `before_agent_start` → injects an internal message | hidden (`display: false`) |
 | **Queued turn** (submit while the model is still replying) | pi injects via `steer`/`followUp`, which bypasses `before_agent_start`; handled on the `input` event by baking into the message text | visible |
+| **Agent loop (`read` tool)** | the model itself calls `read image.png`; handled on `message_end` by replacing the tool result's image block with the description | visible (part of the tool result) |
 
 Note: there is currently **no reliable way to hide** a description for queued
 messages (the `context`/`before_provider_request` hooks are only wired on the SDK
 path, and hidden steer injection is timing-unreliable), so queued descriptions show
 in the transcript.
+
+### Agent-loop images (`read` tool)
+
+When the model reads an image file via the `read` tool, pi's tool result contains a
+text note (`Read image file [image/png]`) **plus an image content block** — and for
+text-only models the image is dropped with
+`[Current model does not support images. The image will be omitted from this request.]`
+That's the agent-loop analogue of the paste case: the model calls `read` and gets
+nothing.
+
+The extension covers this too:
+
+1. `tool_execution_start` remembers the file path per `toolCallId`.
+2. `message_end` (fires for every `toolResult` message) finds image blocks, runs the
+   same one-shot vision call against the sidecar model, and **replaces the image
+   block with the description text**.
+
+The replacement is applied in-place before the message is persisted, so the
+description lands in session history and follow-ups just work. The original file is
+preferred over the tool's (possibly resized) base64 data; when the file can't be
+reached, the base64 data in the message is described directly. Descriptions are
+cached per resolved path / data hash, and the cache is shared with the paste path.
 
 ### Status indicator
 
