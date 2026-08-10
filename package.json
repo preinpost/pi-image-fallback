@@ -1,6 +1,6 @@
 {
   "name": "pi-image-fallback",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "pi extension: let a text-only model see pasted images through a vision sidecar, without ever switching models.",
   "type": "module",
   "license": "MIT",

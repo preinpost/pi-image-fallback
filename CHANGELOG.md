@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/preinpost/pi-image-fallback/compare/v1.0.1...v1.1.0) (2026-08-10)
+
+
+### Features
+
+* describe images read via the read tool for text-only models ([17fd509](https://github.com/preinpost/pi-image-fallback/commit/17fd5097554c92d22aecaf1950aec3cc30b59aa9))
+
 ## [1.0.1](https://github.com/preinpost/pi-image-fallback/compare/v1.0.0...v1.0.1) (2026-08-07)
 
 
