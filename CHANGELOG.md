@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/preinpost/pi-image-fallback/compare/v1.1.0...v1.1.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* abort vision calls that stall (timeout + maxTokens) ([c4708a9](https://github.com/preinpost/pi-image-fallback/commit/c4708a90a0707e214f733afaeb41b30cdd3a4dc4))
+
 # [1.1.0](https://github.com/preinpost/pi-image-fallback/compare/v1.0.1...v1.1.0) (2026-08-10)
 
 
