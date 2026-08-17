@@ -46,7 +46,18 @@ interface ModelRef {
 
 interface Config {
 	imageModel?: ModelRef | null;
+	/** Max wall-clock time per vision call before it is aborted. Default 90s. */
+	timeoutMs?: number;
+	/** Max completion tokens per vision call (reasoning + content). Default 1500. */
+	maxTokens?: number;
 }
+
+// A stalled vision call (no response, no error) would otherwise hang the turn
+// forever — the footer shows "describing…" and before_agent_start never
+// resolves. AbortSignal.timeout() turns a stall into a caught error so the
+// turn proceeds without a description (fail-open).
+const DEFAULT_TIMEOUT_MS = 90_000;
+const DEFAULT_MAX_TOKENS = 1500;
 
 function configPath(): string {
 	return join(getAgentDir(), "image-fallback.json");
@@ -121,7 +132,9 @@ function mimeForPath(p: string): string {
 
 export default function imageFallbackExtension(pi: ExtensionAPI) {
 	const config = loadConfig();
-	log("extension loaded, config=", JSON.stringify(config));
+	const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	const maxTokens = config.maxTokens ?? DEFAULT_MAX_TOKENS;
+	log("extension loaded, config=", JSON.stringify(config), "| timeoutMs=", timeoutMs, "| maxTokens=", maxTokens);
 
 	// Cache descriptions per image path so re-referencing the same image (or a
 	// follow-up) doesn't pay another vision round-trip.
@@ -188,7 +201,13 @@ export default function imageFallbackExtension(pi: ExtensionAPI) {
 				},
 			],
 		};
-		const res = await ctx.modelRegistry.complete(model, context, {});
+		const res = await ctx.modelRegistry.complete(model, context, {
+			// Stall guard: without a signal, a hung upstream (e.g. OpenRouter
+			// "processing" delays on reasoning models) blocks the turn forever.
+			signal: AbortSignal.timeout(timeoutMs),
+			// Cap output so a runaway reasoning pass can't balloon cost/latency.
+			maxTokens,
+		});
 		const text = res.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text" && !!c.text)
 			.map((c) => c.text);
@@ -226,7 +245,9 @@ export default function imageFallbackExtension(pi: ExtensionAPI) {
 					log("  described chars=", txt.length);
 				}
 			} catch (err) {
-				log("  describe failed for", p, String(err));
+				const timedOut =
+					err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+				log(timedOut ? `  describe timed out after ${timeoutMs}ms for` : "  describe failed for", p, String(err));
 			}
 		}
 		return descriptions;

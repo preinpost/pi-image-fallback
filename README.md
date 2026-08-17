@@ -129,3 +129,20 @@ Config is persisted to `~/.pi/agent/image-fallback.json`:
 ```json
 { "imageModel": { "provider": "openrouter", "id": "openai/gpt-5.6-luna" } }
 ```
+
+### Timeout & output cap
+
+Vision calls are guarded against stalls: a sidecar request that neither responds
+nor errors (e.g. an OpenRouter reasoning model sitting in its processing phase)
+would otherwise leave the footer stuck on `describing…` and block the turn
+forever. By default a call is aborted after **90s** and capped at **1500
+completion tokens**; on timeout the image is skipped (logged as `describe
+timed out`) and the turn proceeds without a description.
+
+```json
+{
+  "imageModel": { "provider": "openrouter", "id": "openai/gpt-5.6-luna" },
+  "timeoutMs": 60000,
+  "maxTokens": 2000
+}
+```
